@@ -258,6 +258,44 @@ const api = {
   cbnFixWarp: function () { return call('api:cbn-fix-warp'); },
   cbnTestWarp: function () { return call('api:cbn-test-warp'); },
 
+  // ── контекстное меню ──
+  contextMenuStatus: function () { return call('api:context-menu-status'); },
+  contextMenuRegister: function () { return call('api:context-menu-register'); },
+  contextMenuUnregister: function () { return call('api:context-menu-unregister'); },
+
+  // ── email emulator ──
+  emailSanitize: function (email) {
+    const e = str(email, 254);
+    if (!e) return Promise.resolve({ ok: false, msg: 'Некорректный email' });
+    return call('api:email-sanitize', e);
+  },
+  emailAges: function () { return call('api:email-ages'); },
+  emailSave: function (opts) {
+    const o = plainObject(opts, 8 * 1024);
+    if (!o) return Promise.resolve({ ok: false, msg: 'Некорректные данные' });
+    if (typeof o.profile !== 'string' || typeof o.email !== 'string') return Promise.resolve({ ok: false, msg: 'Некорректные данные' });
+    return call('api:email-save', { profile: o.profile, email: o.email, age: o.age });
+  },
+  emailRead: function (profile) {
+    const pr = str(profile, 64);
+    if (!pr) return Promise.resolve({ ok: false, msg: 'Некорректное имя профиля' });
+    return call('api:email-read', pr);
+  },
+  emailRemove: function (profile) {
+    const pr = str(profile, 64);
+    if (!pr) return Promise.resolve({ ok: false, msg: 'Некорректное имя профиля' });
+    return call('api:email-remove', pr);
+  },
+
+  // ── WARP manager ──
+  warpStatus: function () { return call('api:warp-status'); },
+  warpInstall: function () { return call('api:warp-install'); },
+  warpStart: function () { return call('api:warp-start'); },
+  warpStop: function () { return call('api:warp-stop'); },
+  warpHide: function () { return call('api:warp-hide'); },
+  warpDisableAutostart: function () { return call('api:warp-disable-autostart'); },
+  warpAutostartStatus: function () { return call('api:warp-autostart-status'); },
+
   // ── логи ──
   readLogs: function () { return call('api:read-logs'); },
   clearLogs: function () { return call('api:clear-logs'); },

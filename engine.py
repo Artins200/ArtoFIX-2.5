@@ -2311,6 +2311,116 @@ class BrowserManager:
         return None
 
     # ── общие опции запуска ──
+    def load_email_cookies(self, profile_path):
+        """
+        Читает _artofix_email_for_engine.json из папки профиля.
+        Формат: { email, age, cookies: [{domain, path, name, value, expires, secure, httpOnly, sameSite}], meta }
+        Возвращает список cookies или [].
+        """
+        try:
+            fp = os.path.join(profile_path, "_artofix_email_for_engine.json")
+            if not os.path.exists(fp):
+                return []
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            cookies = data.get("cookies") or []
+            # Валидация базовая
+            out = []
+            for c in cookies:
+                if not isinstance(c, dict): continue
+                name = c.get("name")
+                value = c.get("value")
+                domain = c.get("domain")
+                if not name or value is None or not domain: continue
+                # Ограничиваем длину
+                if len(str(name)) > 200 or len(str(value)) > 4000: continue
+                out.append(c)
+            if out:
+                print(f"[engine] email emulation: {data.get('email','?')} age={data.get('age','?')} cookies={len(out)}")
+            return out
+        except Exception as e:
+            print(f"[engine] email cookies load warning: {e}")
+            return []
+
+    def inject_email_cookies(self, driver, cookies):
+        """
+        Инжектит email cookies через CDP Network.setCookie и также через document.cookie page-init скриптом.
+        Делает почту "старой" — сайты видят возрастные куки провайдера.
+        """
+        if not cookies:
+            return 0
+        injected = 0
+        # 1) Через CDP — для текущего домена и всех доменов
+        for c in cookies:
+            try:
+                # CDP setCookie требует url или domain
+                # Пытаемся через domain
+                params = {
+                    "name": c["name"],
+                    "value": c["value"],
+                    "domain": c.get("domain", ""),
+                    "path": c.get("path", "/"),
+                    "secure": bool(c.get("secure", False)),
+                    "httpOnly": bool(c.get("httpOnly", False)),
+                }
+                exp = c.get("expires")
+                if exp:
+                    # CDP ожидает epoch seconds
+                    try:
+                        params["expires"] = float(exp)
+                    except Exception:
+                        pass
+                ss = c.get("sameSite")
+                if ss in ("Strict", "Lax", "None"):
+                    params["sameSite"] = ss
+                # Если есть url в cookie — используем его для более надёжной установки
+                # (для host-only cookies)
+                # CDP: если domain начинается с . — это для всех поддоменов, ок
+                driver.execute_cdp_cmd("Network.setCookie", params)
+                injected += 1
+            except Exception as e:
+                # Fallback: пробуем через document.cookie позже (page-init)
+                # print(f"[engine] cookie CDP fail {c.get('name')}: {e}")
+                pass
+        # 2) Page-init скрипт для document.cookie (для тех что не httpOnly)
+        try:
+            js_cookies = [c for c in cookies if not c.get("httpOnly")]
+            if js_cookies:
+                # Генерируем JS который ставит куки через document.cookie на новых документах
+                lines = []
+                for c in js_cookies[:20]:  # лимит 20 для init скрипта
+                    # экранируем через json для безопасности
+                    import json as _jsjson
+                    name = _jsjson.dumps(c["name"])[1:-1]
+                    val = _jsjson.dumps(str(c["value"]))[1:-1]
+                    path = _jsjson.dumps(c.get("path", "/"))[1:-1]
+                    domain = _jsjson.dumps(c.get("domain", ""))[1:-1]
+                    exp_str = ""
+                    if c.get("expires"):
+                        try:
+                            import datetime as _dt
+                            exp_str = "; expires=" + _dt.datetime.utcfromtimestamp(float(c["expires"])).strftime('%a, %d %b %Y %H:%M:%S GMT')
+                        except Exception:
+                            pass
+                    cookie_line = f"{name}={val}; path={path}"
+                    if domain:
+                        cookie_line += f"; domain={domain}"
+                    cookie_line += exp_str
+                    if c.get("secure"):
+                        cookie_line += "; Secure"
+                    if c.get("sameSite") in ("Lax","Strict","None"):
+                        cookie_line += f"; SameSite={c['sameSite']}"
+                    # JS
+                    lines.append(f"try{{document.cookie='{cookie_line}';}}catch(_e){{}}")
+                js_code = ";".join(lines)
+                if js_code:
+                    init_js = f"try{{{js_code}}}catch(_e){{}}"
+                    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": init_js})
+        except Exception as e:
+            print(f"[engine] email cookie init-script warning: {e}")
+        print(f"[engine] email cookies injected: {injected}/{len(cookies)} via CDP")
+        return injected
+
     def _common_opts(self, opt, profile_path, ident):
         opt.add_argument(f"--user-data-dir={profile_path}")
         opt.add_argument("--profile-directory=Default")
@@ -2593,6 +2703,19 @@ class BrowserManager:
             # 3) Отпечаток применяем ДО первой навигации
             self._inject_init(driver, ident)
             self.apply_identity(driver, ident, cfg)
+
+            # 3.5) Email эмуляция: подставляем aged cookies почты
+            try:
+                email_cookies = self.load_email_cookies(profile_path)
+                if email_cookies:
+                    # Включаем Network домен для setCookie
+                    try:
+                        driver.execute_cdp_cmd("Network.enable", {})
+                    except Exception:
+                        pass
+                    self.inject_email_cookies(driver, email_cookies)
+            except Exception as e:
+                print(f"[engine] email injection warning: {e}")
 
             # 4) Воркеры: тот же отпечаток, что и в кадрах (иначе скрипт сравнивает
             #    главный поток с Worker и видит подмену).

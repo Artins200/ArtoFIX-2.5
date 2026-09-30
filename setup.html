@@ -255,7 +255,9 @@ body {
     </div>
     <div class="perm-list" id="perm-list"></div>
     <div class="perm-desc">
-      Для работы программы требуется скачать Python 3 с официального сайта <b>python.org</b> и установить библиотеки (Selenium, Selenium-Stealth, WebDriver-Manager). Установщик запустится тихо и удалится сразу после завершения.
+      Для работы программы требуется скачать Python 3 с официального сайта <b>python.org</b> и установить библиотеки (Selenium, Selenium-Stealth, WebDriver-Manager).
+      Также будет установлен <b>Cloudflare WARP</b> с официального сайта (невидимый в трее, запускается только с Artofix — если WARP уже был до Artofix, автозагрузку не трогаем).
+      Установщики запустятся тихо и удалятся сразу после завершения.
     </div>
     <div class="btn-row" style="margin-top:6px">
       <button class="btn btn-primary" id="btn-perm-confirm" data-af-on="click" data-af-action="confirmInstall">✓ Разрешить установку</button>
@@ -274,6 +276,8 @@ body {
     <div class="step-dot" id="sd-chrome"><div class="dot"></div>ChromeDriver</div>
     <div class="step-line"></div>
     <div class="step-dot" id="sd-edge"><div class="dot"></div>EdgeDriver</div>
+    <div class="step-line"></div>
+    <div class="step-dot" id="sd-warp"><div class="dot"></div>WARP</div>
     <div class="step-line"></div>
     <div class="step-dot" id="sd-done"><div class="dot"></div>Готово</div>
   </div>

@@ -76,6 +76,9 @@ test('main.js выполняется без ошибок и регистриру
       if (mod === 'net') return require('net');
       if (mod === './security') return require(path.join(ROOT, 'security.js'));
       if (mod === './fingerprint-identity') return require(path.join(ROOT, 'fingerprint-identity.js'));
+      if (mod === './context-menu') return require(path.join(ROOT, 'context-menu.js'));
+      if (mod === './email-emulator') return require(path.join(ROOT, 'email-emulator.js'));
+      if (mod === './warp-manager') return require(path.join(ROOT, 'warp-manager.js'));
       if (mod === './package.json') return require(path.join(ROOT, 'package.json'));
       return require(mod);
     },

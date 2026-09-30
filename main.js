@@ -31,6 +31,9 @@ const { fileURLToPath } = require('url');
 const sec = require('./security');
 const fpEngine = require('./fingerprint-identity');
 const pkg = require('./package.json');
+const ctxMenu = require('./context-menu');
+const emailEmu = require('./email-emulator');
+const warpMgr = require('./warp-manager');
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -64,7 +67,32 @@ function profilesRoot() {
 function profileDir(name) {
   const safe = sec.sanitizeProfileName(name);
   if (!safe) return null;
-  return sec.safeJoinInside(profilesRoot(), safe);
+  const joined = sec.safeJoinInside(profilesRoot(), safe);
+  if (!joined) return null;
+  // 0-day fix: проверяем что путь не является симлинком и не ведёт наружу
+  if (!sec.isSafeRealPath(joined, profilesRoot())) {
+    console.warn('[security] profileDir отклонён — симлинк или вне базы: ' + joined);
+    return null;
+  }
+  // Если папка уже существует — проверяем что она не симлинк
+  try {
+    if (fs.existsSync(joined)) {
+      const stat = fs.lstatSync(joined);
+      if (stat.isSymbolicLink()) {
+        console.warn('[security] profileDir — симлинк заблокирован: ' + joined);
+        return null;
+      }
+      // Дополнительная проверка realpath
+      const real = fs.realpathSync.native(joined);
+      if (!sec.isInside(profilesRoot(), real)) {
+        console.warn('[security] profileDir realpath вне profiles: ' + real);
+        return null;
+      }
+    }
+  } catch (_) {
+    return null;
+  }
+  return joined;
 }
 
 function findPython() {
@@ -101,21 +129,33 @@ function relaunchAsAdmin() {
   if (!IS_WIN) return;
   const exe = process.execPath;
   const cwd = app.isPackaged ? path.dirname(process.execPath) : __dirname;
-  const args = process.argv.slice(1).filter((a) => a.length < 512);
-  // Каждый аргумент — отдельный литерал PowerShell: массива строк достаточно,
-  // чтобы не собрать инъекцию из кавычек в пути.
+  if (!exe || exe.length > 512 || /[\u0000-\u001f\u007f]/.test(exe)) return;
+  const args = process.argv.slice(1).filter((a) => a.length < 512 && !/[\u0000-\u001f\u007f]/.test(a));
+  // 0-day fix: Base64 encoded command to avoid injection via quotes in path
   const psArgs = args.map((a) => "'" + a.replace(/'/g, "''") + "'").join(',');
   const psCommand =
     'Start-Process -FilePath ' + quotePs(exe) + ' ' +
     (psArgs ? '-ArgumentList @(' + psArgs + ') ' : '') +
     '-Verb RunAs -WorkingDirectory ' + quotePs(cwd);
-
-  spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', psCommand], {
-    detached: true, windowsHide: true, stdio: 'ignore',
-  }).unref();
+  try {
+    const buf = Buffer.from(psCommand, 'utf16le');
+    const encoded = buf.toString('base64');
+    spawn('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+      detached: true, windowsHide: true, stdio: 'ignore',
+    }).unref();
+  } catch (_) {
+    spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', psCommand], {
+      detached: true, windowsHide: true, stdio: 'ignore',
+    }).unref();
+  }
   app.exit(0);
 }
-function quotePs(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
+function quotePs(s) {
+  const str = String(s);
+  if (str.length > 512) return "''";
+  if (/[\u0000-\u001f\u007f]/.test(str)) return "''";
+  return "'" + str.replace(/'/g, "''") + "'"; 
+}
 
 function checkAdmin() {
   if (!IS_WIN) return;             // в остальных ОС hosts/DNS-фичи просто недоступны
@@ -1258,17 +1298,18 @@ function hostsWriteAdmin(domains) {
   let next;
   try { next = hostsBuild(current, clean.domains); } catch (e) { return { ok: false, msg: e.message }; }
 
-  const tmpHosts = path.join(app.getPath('temp'), 'artofix_hosts_patch.txt');
-  const tmpCopy = path.join(app.getPath('temp'), 'artofix_hosts_copy.txt');
-  const psScriptPath = path.join(app.getPath('temp'), 'artofix_hosts_patch.ps1');
+  // 0-day fix: используем рандомные имена временных файлов с защитой от symlink race
+  const tmpHosts = sec.secureTempPath('artofix_hosts', 'txt');
+  const tmpCopy = sec.secureTempPath('artofix_hosts_elev', 'ps1');
+  const psScriptPath = sec.secureTempPath('artofix_hosts_patch', 'ps1');
 
   try {
-    fs.writeFileSync(tmpHosts, next, 'utf-8');
+    fs.writeFileSync(tmpHosts, next, 'utf-8', { mode: 0o600 });
     fs.writeFileSync(psScriptPath, [
       '$ErrorActionPreference = "Stop"',
       'Copy-Item -LiteralPath $env:ARTOFIX_SRC -Destination $env:ARTOFIX_DST -Force',
       'ipconfig /flushdns | Out-Null',
-    ].join('\n'), 'utf-8');
+    ].join('\n'), 'utf-8', { mode: 0o600 });
     // запускаем от имени администратора ТОТ ЖЕ скрипт (без интерполяции значений)
     const elevate = [
       '$ErrorActionPreference = "Stop"',
@@ -1276,7 +1317,7 @@ function hostsWriteAdmin(domains) {
         "@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', $env:ARTOFIX_PS)",
       'exit $p.ExitCode',
     ].join('\n');
-    fs.writeFileSync(tmpCopy, elevate, 'utf-8');
+    fs.writeFileSync(tmpCopy, elevate, 'utf-8', { mode: 0o600 });
 
     return new Promise((resolve) => {
       const proc = spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', tmpCopy], {
@@ -2071,6 +2112,131 @@ handle('api:reroll-profile', (_e, payload) => {
   } catch (e) { return { ok: false, msg: e.message }; }
 });
 
+
+// ── контекстное меню ──
+handle('api:context-menu-status', async () => {
+  return ctxMenu.isContextMenuRegistered();
+});
+handle('api:context-menu-register', async () => {
+  if (rateLimited('ctx-menu', 3000)) return { ok: false, msg: 'Слишком часто' };
+  return ctxMenu.registerContextMenu();
+});
+handle('api:context-menu-unregister', async () => {
+  if (rateLimited('ctx-menu', 3000)) return { ok: false, msg: 'Слишком часто' };
+  return ctxMenu.unregisterContextMenu();
+});
+
+// ── email emulator ──
+handle('api:email-sanitize', (_e, email) => {
+  const clean = emailEmu.sanitizeEmail(email);
+  if (!clean) return { ok: false, msg: 'Некорректный email' };
+  return { ok: true, email: clean, provider: emailEmu.detectProvider(clean) };
+});
+handle('api:email-ages', () => emailEmu.listAges());
+handle('api:email-save', (_e, payload) => {
+  const o = payload && typeof payload === 'object' ? payload : {};
+  const profile = sec.sanitizeProfileName(o.profile);
+  const email = sec.sanitizeEmail(o.email) || emailEmu.sanitizeEmail(o.email);
+  const age = typeof o.age === 'string' ? o.age : '1-2 года';
+  if (!profile) return { ok: false, msg: 'Недопустимое имя профиля' };
+  if (!email) return { ok: false, msg: 'Некорректный email' };
+  const dir = profileDir(profile);
+  if (!dir) return { ok: false, msg: 'Путь профиля небезопасен' };
+  return emailEmu.saveEmailEmulation(dir, email, age, getInstallId(), profile);
+});
+handle('api:email-read', (_e, profile) => {
+  const safe = sec.sanitizeProfileName(profile);
+  if (!safe) return { ok: false, msg: 'Недопустимое имя' };
+  const dir = profileDir(safe);
+  if (!dir) return { ok: false, msg: 'Путь небезопасен' };
+  return emailEmu.readEmailEmulation(dir);
+});
+handle('api:email-remove', (_e, profile) => {
+  const safe = sec.sanitizeProfileName(profile);
+  if (!safe) return { ok: false, msg: 'Недопустимое имя' };
+  const dir = profileDir(safe);
+  if (!dir) return { ok: false, msg: 'Путь небезопасен' };
+  return emailEmu.removeEmailEmulation(dir);
+});
+
+// ── WARP manager ──
+handle('api:warp-status', async () => {
+  return warpMgr.getWarpStatus();
+});
+handle('api:warp-install', async (event, payload) => {
+  if (!IS_WIN) return { ok: false, msg: 'WARP доступен только в Windows' };
+  if (rateLimited('warp-install', 10000)) return { ok: false, msg: 'Слишком часто' };
+  const log = (msg, type) => {
+    try { send('diag-log', { msg: sec.sanitizeLabel(msg, 500), type: type || 'info' }); } catch (_) {}
+    try { sendToSetup('setup-log', { msg: sec.sanitizeLabel(msg, 400), type: type || 'info' }); } catch (_) {}
+  };
+  const prog = (pct, label) => {
+    try { send('diag-progress', { pct, label: sec.sanitizeLabel(label, 120) }); } catch (_) {}
+    try { sendToSetup('setup-step', { text: sec.sanitizeLabel(label, 120), pct }); } catch (_) {}
+  };
+  try {
+    log('🔍 Проверяем установлен ли WARP...', 'info');
+    const status = await warpMgr.checkWarpInstalledAsync();
+    if (status.installed) {
+      log('✓ WARP уже установлен: ' + (status.paths ? status.paths[0] : 'via registry'), 'ok');
+      // Если был до нас — помечаем как предустановленный
+      if (!warpMgr.wasWarpPreinstalled() && !warpMgr.wasWarpInstalledByUs()) {
+        warpMgr.markWarpPreinstalled();
+        log('ℹ WARP был до Artofix — помечен как предустановленный (автозагрузку не трогаем)', 'info');
+      }
+      return { ok: true, alreadyInstalled: true, status };
+    }
+    log('⬇ Скачиваем WARP с официального сайта Cloudflare...', 'info');
+    prog(10, 'Скачивание WARP...');
+    const installer = await warpMgr.downloadWarpWithFallback((p) => {
+      const pct = 10 + Math.round(p.pct * 0.5);
+      prog(pct, `Скачивание WARP ${p.pct.toFixed(0)}%`);
+    });
+    log(`✓ WARP скачан: ${(fs.statSync(installer).size / 1024 / 1024).toFixed(1)} МБ`, 'ok');
+    prog(70, 'Установка WARP...');
+    log('⚙ Устанавливаем WARP (тихая установка)...', 'info');
+    const inst = await warpMgr.installWarp(installer);
+    try { if (fs.existsSync(installer)) fs.unlinkSync(installer); } catch (_) {}
+    if (!inst.ok) {
+      log('✗ Ошибка установки WARP: ' + inst.msg, 'err');
+      return { ok: false, msg: inst.msg };
+    }
+    log('✓ WARP установлен! ' + (inst.hadWarpBefore ? '(был до этого)' : '(установлен Artofix)'), 'ok');
+    prog(85, 'Настройка автозагрузки...');
+    // Если мы его ставили — убираем из автозагрузки
+    if (!inst.hadWarpBefore) {
+      const dis = await warpMgr.disableWarpAutostart();
+      if (dis.ok) log('✓ Автозагрузка WARP отключена — будет запускаться только с Artofix', 'ok');
+    } else {
+      log('ℹ WARP был до Artofix — автозагрузку не меняем', 'info');
+    }
+    prog(95, 'Скрываем из трея...');
+    const hide = await warpMgr.hideWarpTray();
+    if (hide.ok) log('✓ WARP скрыт из трея (невидимый режим)', 'ok');
+    prog(100, 'Готово!');
+    return { ok: true, installed: true, hadBefore: inst.hadWarpBefore };
+  } catch (e) {
+    log('✗ Ошибка WARP: ' + e.message, 'err');
+    return { ok: false, msg: e.message };
+  }
+});
+handle('api:warp-start', async () => {
+  return warpMgr.startWarp();
+});
+handle('api:warp-stop', async () => {
+  return warpMgr.stopWarp();
+});
+handle('api:warp-hide', async () => {
+  return warpMgr.hideWarpTray();
+});
+handle('api:warp-disable-autostart', async () => {
+  return warpMgr.disableWarpAutostart();
+});
+handle('api:warp-autostart-status', async () => {
+  return warpMgr.getWarpAutostartStatus();
+});
+
+
 // ── ошибки рендерера ──
 handleSend('api:report-error', (_e, payload) => {
   const o = payload && typeof payload === 'object' ? payload : {};
@@ -2384,10 +2550,161 @@ async function runSetup() {
   log(/OK chrome/.test(r.stdout) ? '✓ ChromeDriver готов' : '⚠ ChromeDriver не скачался', /OK chrome/.test(r.stdout) ? 'ok' : 'warn');
   log(/OK edge/.test(r.stdout) ? '✓ EdgeDriver готов' : '⚠ EdgeDriver не скачался', /OK edge/.test(r.stdout) ? 'ok' : 'warn');
 
+  // ── WARP: установка с интернета, невидимый трей, только с Artofix ──
+  try {
+    step('Проверка Cloudflare WARP...', 92);
+    const warpStatus = await warpMgr.checkWarpInstalledAsync();
+    if (warpStatus.installed) {
+      log('✓ WARP уже установлен: ' + (warpStatus.paths ? warpStatus.paths[0] : 'via registry'), 'ok');
+      if (!warpMgr.wasWarpPreinstalled() && !warpMgr.wasWarpInstalledByUs()) {
+        warpMgr.markWarpPreinstalled();
+        log('ℹ WARP был до Artofix — помечен как предустановленный (автозагрузку не трогаем)', 'info');
+      }
+    } else {
+      log('⬇ WARP не установлен — скачиваем с официального сайта Cloudflare...', 'info');
+      step('Скачивание WARP...', 93);
+      let warpInstaller = null;
+      try {
+        warpInstaller = await warpMgr.downloadWarpWithFallback((prog) => {
+          const pct = 92 + Math.round(prog.pct * 0.04);
+          step('Скачивание WARP (' + prog.pct.toFixed(0) + '%)...', pct);
+        });
+        log('✓ WARP скачан (' + (fs.statSync(warpInstaller).size / 1024 / 1024).toFixed(1) + ' МБ)', 'ok');
+        step('Установка WARP (тихая)...', 97);
+        const instRes = await warpMgr.installWarp(warpInstaller);
+        if (instRes.ok) {
+          log('✓ WARP установлен: ' + (instRes.hadWarpBefore ? 'был до этого (не трогаем автозагрузку)' : 'установлен Artofix (скрыт из трея, запуск только с Artofix)'), 'ok');
+          if (instRes.installedByUs) {
+            try {
+              const dis = await warpMgr.disableWarpAutostart();
+              if (dis.ok) log('✓ Автозагрузка WARP отключена — будет запускаться только с Artofix', 'ok');
+            } catch(_){}
+            try {
+              const hide = await warpMgr.hideWarpTray();
+              if (hide.ok) log('✓ WARP скрыт из трея (невидимый режим)', 'ok');
+            } catch(_){}
+          }
+        } else {
+          log('⚠ WARP не установлен: ' + instRes.msg + ' (можно установить позже из Чебурнет вкладки)', 'warn');
+        }
+      } catch (e) {
+        log('⚠ WARP не удалось скачать/установить: ' + e.message + ' (можно установить позже из Чебурнет вкладки)', 'warn');
+      } finally {
+        if (warpInstaller) {
+          try { if (fs.existsSync(warpInstaller)) fs.unlinkSync(warpInstaller); } catch(_){}
+        }
+      }
+    }
+  } catch (e) {
+    log('⚠ Ошибка проверки WARP: ' + e.message, 'warn');
+  }
+
   step('Установка завершена!', 100);
   markSetupDone();
   await new Promise((r2) => setTimeout(r2, 800));
   sendToSetup('setup-done', true);
+}
+
+// ═══════════════════════════════════════════
+//  WARP LIFECYCLE (запуск только с Artofix, невидимый в трее)
+// ═══════════════════════════════════════════
+let warpWasRunningByUs = false;
+
+async function handleWarpOnStartup() {
+  if (!IS_WIN) return;
+  try {
+    const status = await warpMgr.getWarpStatus();
+    // Если WARP не установлен — ничего не делаем (пользователь может установить через UI)
+    if (!status.installed) return;
+    // Если WARP был предустановлен до Artofix — НИЧЕГО не меняем (ни автозагрузку, ни трей)
+    if (status.preinstalled) {
+      console.log('[warp] Предустановленный WARP обнаружен — не трогаем автозагрузку и трей');
+      return;
+    }
+    // Если WARP установлен нами — запускаем только с Artofix и скрываем из трея
+    if (status.installedByUs) {
+      console.log('[warp] WARP установлен Artofix — запускаем и скрываем из трея');
+      // Убираем из автозагрузки если ещё не убрали
+      const autostart = await warpMgr.getWarpAutostartStatus();
+      if (autostart.autostart) {
+        await warpMgr.disableWarpAutostart();
+        console.log('[warp] Автозагрузка WARP отключена');
+      }
+      // Запускаем
+      const started = await warpMgr.startWarp();
+      if (started.ok) {
+        warpWasRunningByUs = true;
+        console.log('[warp] WARP запущен через Artofix');
+        // Скрываем из трея через небольшую задержку (чтобы UI успел создаться)
+        setTimeout(async () => {
+          await warpMgr.hideWarpTray();
+          console.log('[warp] WARP скрыт из трея');
+        }, 3000);
+      }
+    }
+  } catch (e) {
+    console.warn('[warp] Ошибка при обработке WARP на старте: ' + e.message);
+  }
+}
+
+async function handleWarpOnQuit() {
+  if (!IS_WIN) return;
+  try {
+    // Останавливаем WARP только если мы его запускали и он был установлен нами
+    if (warpWasRunningByUs && warpMgr.wasWarpInstalledByUs()) {
+      console.log('[warp] Останавливаем WARP (запущен Artofix)');
+      await warpMgr.stopWarp();
+    } else if (warpMgr.wasWarpPreinstalled()) {
+      console.log('[warp] WARP предустановлен — не останавливаем');
+    }
+  } catch (e) {
+    console.warn('[warp] Ошибка при остановке WARP: ' + e.message);
+  }
+}
+
+// ═══════════════════════════════════════════
+//  CONTEXT MENU — обработка URL из аргументов
+// ═══════════════════════════════════════════
+let pendingStartupUrl = null;
+
+function handleStartupUrl() {
+  try {
+    const parsed = ctxMenu.extractUrlFromArgs(process.argv);
+    if (parsed) {
+      console.log('[ctx-menu] URL из аргументов запуска: ' + JSON.stringify(parsed));
+      pendingStartupUrl = parsed;
+      return parsed;
+    }
+  } catch (e) {
+    console.warn('[ctx-menu] Ошибка парсинга аргументов: ' + e.message);
+  }
+  return null;
+}
+
+function handleSecondInstanceUrl(argv) {
+  try {
+    const parsed = ctxMenu.extractUrlFromArgs(argv);
+    if (parsed && parsed.url) {
+      console.log('[ctx-menu] URL из второго инстанса: ' + parsed.url);
+      if (win && !win.isDestroyed()) {
+        win.show();
+        win.focus();
+        // Отправляем в рендерер событие для выбора профиля
+        send('navigate', 'binds');
+        setTimeout(() => {
+          send('tray-action', 'open-url:' + parsed.url);
+        }, 500);
+      } else {
+        pendingStartupUrl = parsed;
+      }
+      // Также пробуем сразу запустить через дефолтный профиль
+      const binds = readBinds();
+      const defaultProfile = binds.length ? binds[0].profile : 'default';
+      launchBrowser({ url: parsed.url, profile: defaultProfile, browser: 'chrome' }).catch(() => {});
+    }
+  } catch (e) {
+    console.warn('[ctx-menu] Ошибка второго инстанса: ' + e.message);
+  }
 }
 
 // ═══════════════════════════════════════════
@@ -2397,11 +2714,19 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => { if (win) { win.show(); win.focus(); } });
+  // Обработка URL из первого запуска
+  handleStartupUrl();
+  app.on('second-instance', (_event, argv) => {
+    if (win) { win.show(); win.focus(); }
+    handleSecondInstanceUrl(argv);
+  });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   hardenSession(session.defaultSession);
+
+  // WARP: проверяем и запускаем если нужно
+  await handleWarpOnStartup();
 
   if (needsSetup()) {
     createSetupWindow();
@@ -2413,14 +2738,23 @@ app.whenReady().then(() => {
     createWindow();
     createTray();
     checkAdmin();
+    // Если был URL из контекстного меню — показываем после создания окна
+    if (pendingStartupUrl && pendingStartupUrl.url) {
+      setTimeout(() => {
+        if (win && !win.isDestroyed()) {
+          send('tray-action', 'open-url:' + pendingStartupUrl.url);
+        }
+      }, 1000);
+    }
   }
 });
 
 app.on('window-all-closed', () => { if (!IS_MAC) app.quit(); });
 
-app.on('before-quit', () => {
+app.on('before-quit', async () => {
   isQuiting = true;
   zapretStop();
+  await handleWarpOnQuit();
 });
 
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

@@ -258,12 +258,12 @@ function goTab(tabName, btn) {
 
   // tab-specific init
   if (tabName === 'profiles') renderProfiles();
-  if (tabName === 'settings') initSettingsTab();
+  if (tabName === 'settings') { initSettingsTab(); try { initEmailAges(); populateEmailProfileSelect(); } catch(_){} }
   if (tabName === 'config')   { loadConfig(); loadSpoofConfig(); loadCfConfig(); initFpProfileSelect(); }
   if (tabName === 'binds')         initBindsTab();
   if (tabName === 'adblock')       initAdblock();
   if (tabName === 'zapret-update') initZapretUpdate();
-  if (tabName === 'cheburnet')     initCheburnet();
+  if (tabName === 'cheburnet')     { initCheburnet(); try { initWarpUI(); } catch(_){} }
   if (tabName === 'logs')          initLogs();
   if (tabName === 'diag')          initDiag();
   if (tabName === 'console')       initConsole();
@@ -310,6 +310,18 @@ async function launchBrowser(url, profile, browser, bypass) {
     showToast('Ошибка моста API: ' + e.message, 'err');
   }
 }
+function launchBrowserWithUrl(url, profile) {
+  if (!url || typeof url !== 'string') return;
+  var prof = profile || 'default';
+  // Определяем браузер по умолчанию из настроек или chrome
+  var br = 'chrome';
+  try {
+    if (APP_SETTINGS && APP_SETTINGS.defaultBrowser) br = APP_SETTINGS.defaultBrowser;
+  } catch(_) {}
+  launchBrowser(url, prof, br, false);
+}
+
+
 
 // ── АВТО-ОБХОД БЕЗ VPN ──
 // Zapret поднимается автоматически при выборе страны и при запуске
@@ -396,6 +408,32 @@ apiBridge.onZapretStatus(function(s) {
 });
 
 apiBridge.onTrayAction(function(a) {
+  if (typeof a === 'string' && a.indexOf('open-url:') === 0) {
+    var url = a.slice(9);
+    try {
+      // Открыть URL через контекстное меню: запускаем браузер с этим URL
+      // Используем default профиль или первый бинд
+      var prof = 'default';
+      // если есть бинды — берем первый
+      try {
+        if (typeof BINDS !== 'undefined' && Array.isArray(BINDS) && BINDS.length) {
+          var first = BINDS[0];
+          if (first && first.profile) prof = first.profile;
+        }
+      } catch (_) {}
+      // Формируем URL с меткой что это из контекстного меню
+      if (typeof launchBrowserWithUrl === 'function') {
+        launchBrowserWithUrl(url, prof);
+      } else if (typeof openBrowser === 'function') {
+        openBrowser(prof, url);
+      } else if (typeof apiBridge !== 'undefined' && apiBridge.launchBrowser) {
+        apiBridge.launchBrowser({ profile: prof, url: url });
+      }
+    } catch (e) {
+      showToast('Ошибка открытия URL: ' + e.message, 'err');
+    }
+    return;
+  }
   if (a === 'run')    zapretStart();
   if (a === 'stop')   zapretStop();
   if (a === 'config') apiBridge.openFolder('Zapret');
@@ -501,6 +539,9 @@ async function renderProfiles() {
       var del = afEl('div', { cls: 'profile-del', attrs: { title: 'Удалить' }, text: '🗑' });
       del.addEventListener('click', function(e) { e.stopPropagation(); deleteProfile(name); });
 
+      var emailBtn = afEl('div', { cls: 'profile-del', attrs: { title: 'Эмуляция почты' }, text: '📧', style: 'right:36px' });
+      emailBtn.addEventListener('click', function(e) { e.stopPropagation(); openEmailModal(name); });
+
       var card = afEl('div', { cls: 'profile-card',
         on: { click: function() { launchBrowser('about:blank', name, browser, false); } } }, [
         ava,
@@ -509,6 +550,7 @@ async function renderProfiles() {
           afEl('div', { cls: 'profile-meta', text: browser + ' · profiles\\' + name }),
           countryBadge,
         ]),
+        emailBtn,
         del,
       ]);
       grid.appendChild(card);
@@ -1256,6 +1298,377 @@ function initSettingsTab() {
   if (bsD)  bsD.textContent = String(Math.round(bs));
   applyBgSurface(bs);
   applyBgImage(s.bgImage || null);
+  // Контекстное меню — подгружаем статус
+  initContextMenuUI();
+}
+
+// ── КОНТЕКСТНОЕ МЕНЮ UI ──
+async function initContextMenuUI() {
+  var statusEl = document.getElementById('ctx-menu-status');
+  var btnOn = document.getElementById('ctx-menu-enable');
+  var btnOff = document.getElementById('ctx-menu-disable');
+  if (!statusEl) return;
+  statusEl.textContent = '⏳ Проверяем...';
+  statusEl.style.color = 'var(--tx3)';
+  try {
+    var r = await apiBridge.contextMenuStatus();
+    if (r && r.ok) {
+      if (r.registered) {
+        statusEl.style.color = 'var(--grn)';
+        statusEl.textContent = r.fullyRegistered ? '✓ Включено (все типы файлов)' : '⚠ Частично включено';
+        if (btnOn) btnOn.disabled = true;
+        if (btnOff) btnOff.disabled = false;
+      } else {
+        statusEl.style.color = 'var(--tx2)';
+        statusEl.textContent = '✗ Выключено — не установлено в системе';
+        if (btnOn) btnOn.disabled = false;
+        if (btnOff) btnOff.disabled = true;
+      }
+    } else {
+      statusEl.style.color = 'var(--tx3)';
+      statusEl.textContent = r && r.reason === 'not windows' ? 'Доступно только в Windows' : 'Не удалось проверить';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Ошибка: ' + e.message;
+    statusEl.style.color = 'var(--red)';
+  }
+}
+
+async function toggleContextMenu(enable) {
+  var statusEl = document.getElementById('ctx-menu-status');
+  if (statusEl) { statusEl.textContent = enable ? '⏳ Включаем...' : '⏳ Выключаем...'; statusEl.style.color = 'var(--ac)'; }
+  try {
+    var r = enable ? await apiBridge.contextMenuRegister() : await apiBridge.contextMenuUnregister();
+    if (r && r.ok) {
+      showToast(enable ? '✓ Контекстное меню включено!' : '✓ Контекстное меню выключено', enable ? 'ok' : '');
+    } else {
+      showToast('Ошибка: ' + ((r && r.msg) || '?'), 'err');
+    }
+  } catch (e) {
+    showToast('Ошибка: ' + e.message, 'err');
+  }
+  initContextMenuUI();
+}
+
+// ── EMAIL EMULATOR UI ──
+var EMAIL_AGES_CACHE = null;
+
+async function initEmailAges() {
+  try {
+    var ages = await apiBridge.emailAges();
+    EMAIL_AGES_CACHE = ages;
+    var sel = document.getElementById('email-age');
+    var sel2 = document.getElementById('mp-email-age');
+    [sel, sel2].forEach(function(s) {
+      if (!s) return;
+      s.textContent = '';
+      ages.forEach(function(a) {
+        s.appendChild(afEl('option', { text: a.label + ' (' + a.days + ' дней)', attrs: { value: a.id } }));
+      });
+      s.value = '1-2 года';
+    });
+  } catch (e) {}
+}
+
+async function saveEmailForProfile(profile) {
+  var emailEl = document.getElementById('email-input-' + profile) || document.getElementById('email-input');
+  var ageEl = document.getElementById('email-age-' + profile) || document.getElementById('email-age');
+  var statusEl = document.getElementById('email-status-' + profile) || document.getElementById('email-status');
+  var email = emailEl ? emailEl.value.trim() : '';
+  var age = ageEl ? ageEl.value : '1-2 года';
+  if (!email) { showToast('Введи email', 'err'); return; }
+  if (statusEl) { statusEl.textContent = '⏳ Проверяем email...'; statusEl.style.color = 'var(--ac)'; }
+  try {
+    var chk = await apiBridge.emailSanitize(email);
+    if (!chk || !chk.ok) {
+      if (statusEl) { statusEl.textContent = '✗ ' + (chk.msg || 'некорректный email'); statusEl.style.color = 'var(--red)'; }
+      showToast('Некорректный email', 'err');
+      return;
+    }
+    if (statusEl) statusEl.textContent = '⏳ Генерируем cookie...';
+    var r = await apiBridge.emailSave({ profile: profile, email: email, age: age });
+    if (r && r.ok) {
+      if (statusEl) { statusEl.style.color = 'var(--grn)'; statusEl.textContent = '✓ ' + r.meta.email + ' — возраст ' + r.meta.ageHuman + ' (' + r.cookiesCount + ' cookies)'; }
+      showToast('📧 Email эмуляция: ' + r.meta.email + ' (' + r.meta.ageHuman + ')', 'ok');
+    } else {
+      if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = '✗ ' + (r.msg || '?'); }
+      showToast('Ошибка: ' + (r.msg || '?'), 'err');
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = '✗ ' + e.message; }
+  }
+}
+
+async function loadEmailForProfile(profile) {
+  var statusEl = document.getElementById('email-status-' + profile) || document.getElementById('email-status');
+  var emailEl = document.getElementById('email-input-' + profile) || document.getElementById('email-input');
+  try {
+    var r = await apiBridge.emailRead(profile);
+    if (r && r.ok && r.exists) {
+      if (emailEl) emailEl.value = r.meta.email || '';
+      if (statusEl) {
+        statusEl.style.color = 'var(--grn)';
+        statusEl.textContent = '✓ ' + r.meta.email + ' — ' + r.meta.ageHuman + ' (создана ' + (r.meta.created ? r.meta.created.slice(0,10) : '?') + ') · провайдер ' + r.meta.provider;
+      }
+      return r;
+    } else {
+      if (statusEl) { statusEl.style.color = 'var(--tx2)'; statusEl.textContent = 'Нет эмулированной почты для этого профиля'; }
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = 'Ошибка: ' + e.message; statusEl.style.color = 'var(--red)'; }
+  }
+  return null;
+}
+
+async function removeEmailForProfile(profile) {
+  if (!confirm('Удалить эмуляцию почты для профиля "' + profile + '"?\nCookie файлы будут удалены.')) return;
+  try {
+    var r = await apiBridge.emailRemove(profile);
+    if (r && r.ok) {
+      showToast('📧 Эмуляция почты удалена для ' + profile, '');
+      var statusEl = document.getElementById('email-status-' + profile) || document.getElementById('email-status');
+      var emailEl = document.getElementById('email-input-' + profile) || document.getElementById('email-input');
+      if (statusEl) { statusEl.style.color = 'var(--tx2)'; statusEl.textContent = 'Эмуляция удалена'; }
+      if (emailEl) emailEl.value = '';
+    } else {
+      showToast('Ошибка: ' + (r.msg || '?'), 'err');
+    }
+  } catch (e) { showToast('Ошибка: ' + e.message, 'err'); }
+}
+
+function openEmailModal(profile) {
+  openModal(
+    '<div class="modal-title"><span>📧</span> Эмуляция почты <span class="modal-close" data-af-on="click" data-af-action="closeModal">✕</span></div>' +
+    '<div style="font-size:11px;color:var(--tx2);line-height:1.6;margin-bottom:12px">' +
+      'Artofix создаёт cookie файлы которые эмулируют возраст почты. Сайт видит что почта старая (6 мес - 3+ года), ' +
+      'но при этом чистая — ею якобы редко пользовались. Это повышает траст при регистрации.<br><br>' +
+      '<b style="color:var(--tx)">Профиль: ' + profile + '</b>' +
+    '</div>' +
+    '<label class="field-label">Email адрес</label>' +
+    '<input class="af-input" id="email-input-' + profile + '" type="text" placeholder="example@gmail.com" style="margin-bottom:8px">' +
+    '<label class="field-label">Возраст почты</label>' +
+    '<select class="af-input" id="email-age-' + profile + '" style="margin-bottom:10px">' +
+      '<option value="новый">Новый (до 1 мес)</option>' +
+      '<option value="6-12 мес">6-12 месяцев</option>' +
+      '<option value="1-2 года" selected>1-2 года</option>' +
+      '<option value="3+ года">3+ года (старый)</option>' +
+    '</select>' +
+    '<div id="email-status-' + profile + '" style="font-size:10.5px;color:var(--tx3);font-family:var(--mono);margin-bottom:12px;min-height:16px"></div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' +
+      '<button class="btn btn-primary" data-af-on="click" data-af-action="saveEmailForProfile" data-af-args="[&quot;' + profile + '&quot;"]">✓ Сохранить</button>' +
+      '<button class="btn btn-secondary" data-af-on="click" data-af-action="loadEmailForProfile" data-af-args="[&quot;' + profile + '&quot;"]">Загрузить</button>' +
+    '</div>' +
+    '<div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:8px">' +
+      '<button class="btn btn-danger" data-af-on="click" data-af-action="removeEmailForProfile" data-af-args="[&quot;' + profile + '&quot;"]">🗑 Удалить</button>' +
+      '<button class="btn btn-secondary" data-af-on="click" data-af-action="closeModal">Закрыть</button>' +
+    '</div>'
+  );
+  setTimeout(function() { loadEmailForProfile(profile); }, 100);
+}
+
+// ── WARP MANAGER UI ──
+
+async function populateEmailProfileSelect() {
+  var sel = document.getElementById('email-profile-select');
+  if (!sel) return;
+  try {
+    var list = await apiBridge.listProfiles();
+    sel.textContent = '';
+    list.forEach(function(name) {
+      var opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    });
+    if (!list.length) {
+      var opt = document.createElement('option');
+      opt.value = 'default';
+      opt.textContent = 'default';
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', function() {
+      var prof = sel.value;
+      var input = document.getElementById('email-input');
+      if (input) input.value = '';
+      loadEmailForProfile(prof);
+    });
+    // auto-load first
+    if (list.length) loadEmailForProfile(list[0]);
+  } catch(e) {}
+}
+
+async function saveEmailCurrent() {
+  var sel = document.getElementById('email-profile-select');
+  var prof = sel ? sel.value : 'default';
+  if (!prof) prof = 'default';
+  // override email-input id to use generic one
+  var emailEl = document.getElementById('email-input');
+  var ageEl = document.getElementById('email-age');
+  var statusEl = document.getElementById('email-status');
+  var email = emailEl ? emailEl.value.trim() : '';
+  var age = ageEl ? ageEl.value : '1-2 года';
+  if (!email) { showToast('Введи email', 'err'); return; }
+  if (statusEl) { statusEl.textContent = '⏳ Проверяем email...'; statusEl.style.color = 'var(--ac)'; }
+  try {
+    var chk = await apiBridge.emailSanitize(email);
+    if (!chk || !chk.ok) {
+      if (statusEl) { statusEl.textContent = '✗ ' + (chk.msg || 'некорректный email'); statusEl.style.color = 'var(--red)'; }
+      showToast('Некорректный email', 'err');
+      return;
+    }
+    if (statusEl) statusEl.textContent = '⏳ Генерируем cookie...';
+    var r = await apiBridge.emailSave({ profile: prof, email: email, age: age });
+    if (r && r.ok) {
+      if (statusEl) { statusEl.style.color = 'var(--grn)'; statusEl.textContent = '✓ ' + r.meta.email + ' — возраст ' + r.meta.ageHuman + ' (' + r.cookiesCount + ' cookies)'; }
+      showToast('📧 Email эмуляция: ' + r.meta.email + ' (' + r.meta.ageHuman + ') для ' + prof, 'ok');
+    } else {
+      if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = '✗ ' + (r.msg || '?'); }
+      showToast('Ошибка: ' + (r.msg || '?'), 'err');
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = '✗ ' + e.message; }
+  }
+}
+
+async function loadEmailCurrent() {
+  var sel = document.getElementById('email-profile-select');
+  var prof = sel ? sel.value : 'default';
+  await loadEmailForProfile(prof);
+}
+
+async function removeEmailCurrent() {
+  var sel = document.getElementById('email-profile-select');
+  var prof = sel ? sel.value : 'default';
+  await removeEmailForProfile(prof);
+}
+
+
+var WARP_PROGRESS_BOUND = false;
+function bindWarpProgress() {
+  if (WARP_PROGRESS_BOUND) return;
+  WARP_PROGRESS_BOUND = true;
+  if (typeof apiBridge.onDiagProgress === 'function') {
+    apiBridge.onDiagProgress(function(d) {
+      var wrap = document.getElementById('warp-progress-wrap');
+      var bar = document.getElementById('warp-progress-bar');
+      var lbl = document.getElementById('warp-progress-label');
+      var pctEl = document.getElementById('warp-progress-pct');
+      if (!wrap || !d) return;
+      // Показываем прогресс только если WARP устанавливается (label содержит WARP)
+      if (d.label && /WARP/i.test(d.label)) {
+        wrap.style.display = 'block';
+        if (bar) bar.style.width = (d.pct || 0) + '%';
+        if (lbl) lbl.textContent = d.label;
+        if (pctEl) pctEl.textContent = Math.round(d.pct || 0) + '%';
+        if (d.pct >= 100) {
+          setTimeout(function(){ wrap.style.display = 'none'; }, 1500);
+        }
+      }
+    });
+  }
+}
+
+async function initWarpUI() {
+  bindWarpProgress();
+  var statusEl = document.getElementById('warp-status');
+  var detailsEl = document.getElementById('warp-details');
+  var btnInstall = document.getElementById('warp-install-btn');
+  var btnStart = document.getElementById('warp-start-btn');
+  var btnStop = document.getElementById('warp-stop-btn');
+  var btnHide = document.getElementById('warp-hide-btn');
+  if (!statusEl) return;
+  statusEl.textContent = '⏳ Проверяем WARP...';
+  statusEl.style.color = 'var(--tx3)';
+  try {
+    var r = await apiBridge.warpStatus();
+    if (!r) { statusEl.textContent = 'Не удалось получить статус'; return; }
+    if (!r.installed) {
+      statusEl.style.color = 'var(--tx2)';
+      statusEl.textContent = '✗ WARP не установлен';
+      if (detailsEl) detailsEl.textContent = 'Нажми "Установить WARP" — скачается с официального сайта Cloudflare и установится тихо. ' +
+        'Если у тебя уже был WARP — он будет помечен как предустановленный и автозагрузка не изменится.';
+      if (btnInstall) btnInstall.disabled = false;
+      if (btnStart) btnStart.disabled = true;
+      if (btnStop) btnStop.disabled = true;
+      if (btnHide) btnHide.disabled = true;
+    } else {
+      statusEl.style.color = r.running ? 'var(--grn)' : 'var(--ylw)';
+      var txt = (r.running ? '✓ WARP установлен и запущен' : '⚠ WARP установлен, но не запущен') +
+        (r.preinstalled ? ' (был до Artofix — автозагрузку не трогаем)' : r.installedByUs ? ' (установлен Artofix — скрыт из трея, автозапуск только с Artofix)' : '');
+      statusEl.textContent = txt;
+      if (detailsEl) {
+        var det = 'Провайдер: Cloudflare · Сервис: ' + (r.serviceStatus || '?') +
+          ' · UI: ' + (r.uiRunning ? 'запущен' : 'скрыт') +
+          ' · Автозагрузка: ' + (r.autostart ? 'включена' + (r.preinstalled ? ' (не трогаем, был до)' : '') : 'выключена (запускается только с Artofix)') +
+          '\nПути: ' + (r.installedDetails && r.installedDetails.paths ? r.installedDetails.paths.join(', ') : 'via registry');
+        detailsEl.textContent = det;
+      }
+      if (btnInstall) btnInstall.disabled = true;
+      if (btnStart) btnStart.disabled = r.running;
+      if (btnStop) btnStop.disabled = !r.running || r.preinstalled;
+      if (btnHide) btnHide.disabled = !r.uiRunning;
+    }
+  } catch (e) {
+    statusEl.textContent = 'Ошибка: ' + e.message;
+    statusEl.style.color = 'var(--red)';
+  }
+}
+
+async function installWarp() {
+  var statusEl = document.getElementById('warp-status');
+  if (statusEl) { statusEl.textContent = '⏳ Устанавливаем WARP...'; statusEl.style.color = 'var(--ac)'; }
+  showToast('⬇ Скачиваем и устанавливаем WARP...', '');
+  try {
+    var r = await apiBridge.warpInstall();
+    if (r && r.ok) {
+      showToast(r.alreadyInstalled ? '✓ WARP уже был установлен' : '✓ WARP установлен! Скрываем из трея...', 'ok');
+    } else {
+      showToast('Ошибка WARP: ' + (r.msg || '?'), 'err');
+    }
+  } catch (e) {
+    showToast('Ошибка: ' + e.message, 'err');
+  }
+  initWarpUI();
+}
+
+async function startWarp() {
+  try {
+    var r = await apiBridge.warpStart();
+    showToast(r && r.ok ? '▶ WARP запущен' : 'Ошибка: ' + (r.msg || '?'), r && r.ok ? 'ok' : 'err');
+  } catch (e) { showToast('Ошибка: ' + e.message, 'err'); }
+  initWarpUI();
+}
+
+async function stopWarp() {
+  try {
+    var r = await apiBridge.warpStop();
+    if (r && r.skipped) {
+      showToast('ℹ ' + r.reason, '');
+    } else {
+      showToast(r && r.ok ? '■ WARP остановлен' : 'Ошибка: ' + (r.msg || '?'), r && r.ok ? '' : 'err');
+    }
+  } catch (e) { showToast('Ошибка: ' + e.message, 'err'); }
+  initWarpUI();
+}
+
+async function hideWarp() {
+  try {
+    var r = await apiBridge.warpHide();
+    showToast(r && r.ok ? '👻 WARP скрыт из трея' : 'Ошибка: ' + (r.msg || '?'), r && r.ok ? 'ok' : 'err');
+  } catch (e) { showToast('Ошибка: ' + e.message, 'err'); }
+  initWarpUI();
+}
+
+async function disableWarpAutostart() {
+  try {
+    var r = await apiBridge.warpDisableAutostart();
+    if (r && r.skipped) {
+      showToast('ℹ ' + r.reason, '');
+    } else {
+      showToast(r && r.ok ? '✓ Автозагрузка WARP отключена' : 'Ошибка: ' + (r.msg || '?'), r && r.ok ? 'ok' : 'err');
+    }
+  } catch (e) { showToast('Ошибка: ' + e.message, 'err'); }
+  initWarpUI();
 }
 
 async function saveSettings() {
@@ -3018,6 +3431,24 @@ AF_ACTIONS = {
   cbnFixWarp: cbnFixWarp,
   cbnTestWarp: cbnTestWarp,
   saveCbn: saveCbn,
+  // WARP manager
+  initWarpUI: initWarpUI,
+  installWarp: installWarp,
+  startWarp: startWarp,
+  stopWarp: stopWarp,
+  hideWarp: hideWarp,
+  disableWarpAutostart: disableWarpAutostart,
+  // context-menu
+  toggleContextMenu: toggleContextMenu,
+  // email emulator
+  saveEmailCurrent: saveEmailCurrent,
+  loadEmailCurrent: loadEmailCurrent,
+  removeEmailCurrent: removeEmailCurrent,
+  initEmailAges: initEmailAges,
+  saveEmailForProfile: saveEmailForProfile,
+  loadEmailForProfile: loadEmailForProfile,
+  removeEmailForProfile: removeEmailForProfile,
+  openEmailModal: openEmailModal,
 
   // логи / диагностика
   renderLogs: renderLogs,

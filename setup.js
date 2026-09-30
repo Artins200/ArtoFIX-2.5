@@ -44,8 +44,9 @@ const STEP_MAP = [
   { pct:  5, id:'sd-python'   },
   { pct: 35, id:'sd-pip'      },
   { pct: 55, id:'sd-selenium' },
-  { pct: 85, id:'sd-chrome'   },
-  { pct: 95, id:'sd-edge'     },
+  { pct: 75, id:'sd-chrome'   },
+  { pct: 85, id:'sd-edge'     },
+  { pct: 95, id:'sd-warp'     },
   { pct:100, id:'sd-done'     },
 ];
 

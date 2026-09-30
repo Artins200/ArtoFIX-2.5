@@ -86,7 +86,10 @@
       "setup.js",
       "index.html",
       "setup.html",
-      "package.json"
+      "package.json",
+      "context-menu.js",
+      "email-emulator.js",
+      "warp-manager.js"
     ],
     "directories": {
       "output": "dist",
@@ -94,7 +97,7 @@
     }
   },
   "devDependencies": {
-    "electron": "^29.0.0",
+    "electron": "^33.4.0",
     "electron-builder": "^24.0.0"
   }
 }

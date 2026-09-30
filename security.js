@@ -356,9 +356,126 @@ function validateInstallerBinary(filePath) {
 function writeFileAtomic(file, data) {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true });
-  const tmp = path.join(dir, '.' + path.basename(file) + '.' + process.pid + '.tmp');
+  const crypto = require('crypto');
+  const rnd = crypto.randomBytes(8).toString('hex');
+  const tmp = path.join(dir, '.' + path.basename(file) + '.' + process.pid + '.' + rnd + '.tmp');
   fs.writeFileSync(tmp, data, 'utf-8');
   fs.renameSync(tmp, file);
+}
+
+/** Генерация безопасного имени временного файла с рандомом */
+function secureTempPath(prefix, ext) {
+  const crypto = require('crypto');
+  const rnd = crypto.randomBytes(12).toString('hex');
+  const os = require('os');
+  const tmpDir = os.tmpdir();
+  const safePrefix = String(prefix || 'artofix').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20);
+  const safeExt = ext ? '.' + String(ext).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) : '';
+  return path.join(tmpDir, `${safePrefix}_${Date.now()}_${rnd}${safeExt}`);
+}
+
+/** Проверка что путь не является симлинком и не ведёт наружу */
+function isSafeRealPath(targetPath, base) {
+  try {
+    if (!fs.existsSync(targetPath)) {
+      // Проверяем родителей
+      let probe = targetPath;
+      let hops = 0;
+      while (!fs.existsSync(probe) && path.dirname(probe) !== probe && hops < 32) {
+        probe = path.dirname(probe);
+        hops++;
+      }
+      if (!fs.existsSync(probe)) return true; // Родитель не существует — считаем безопасным после нормализации
+      const realProbe = fs.realpathSync.native(probe);
+      return isInside(base, realProbe);
+    }
+    const real = fs.realpathSync.native(targetPath);
+    if (real !== path.resolve(targetPath)) {
+      // Это симлинк — потенциально опасно
+      return false;
+    }
+    return isInside(base, real);
+  } catch (_) {
+    return false;
+  }
+}
+
+/** Валидация email (строгая) */
+const EMAIL_RE = /^[a-zA-Z0-9._%+\-]{1,64}@[a-zA-Z0-9.\-]{1,253}\.[a-zA-Z]{2,24}$/;
+function sanitizeEmail(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim().toLowerCase();
+  if (!s || s.length > 254) return null;
+  if (/[\u0000-\u001f\u007f]/.test(s)) return null;
+  if (!EMAIL_RE.test(s)) return null;
+  if (s.includes('..')) return null;
+  if (s.startsWith('.') || s.startsWith('@') || s.endsWith('.')) return null;
+  return s;
+}
+
+/** Валидация URL загрузки WARP (только официальные домены Cloudflare) */
+const WARP_HOSTS = new Set([
+  '1111-releases.cloudflareclient.com',
+  'downloads.cloudflareclient.com',
+  'install.appcenter.ms',
+  'cloudflareclient.com',
+  'www.cloudflareclient.com',
+  '1.1.1.1',
+]);
+function sanitizeWarpUrl(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (!s || s.length > 512) return null;
+  if (/[\u0000-\u001f\u007f]/.test(s)) return null;
+  let u;
+  try { u = new URL(s); } catch (_) { return null; }
+  if (u.protocol !== 'https:') return null;
+  const host = u.hostname.toLowerCase();
+  if (!WARP_HOSTS.has(host) && !host.endsWith('.cloudflareclient.com') && !host.endsWith('.appcenter.ms')) {
+    return null;
+  }
+  return u.toString();
+}
+
+/** Проверка имени файла на zip-slip (path traversal внутри архива) */
+function isSafeArchiveEntry(entryName) {
+  if (typeof entryName !== 'string') return false;
+  const s = entryName.trim();
+  if (!s) return false;
+  if (s.includes('..')) return false;
+  if (path.isAbsolute(s)) return false;
+  if (/^[A-Za-z]:/.test(s)) return false; // C: drive
+  if (s.startsWith('/') || s.startsWith('\\')) return false;
+  if (/[<>:"|?*\u0000-\u001f]/.test(s)) return false;
+  // Проверяем каждый сегмент
+  const parts = s.split(/[\/\\]/);
+  for (const part of parts) {
+    if (part === '..' || part === '.' || part.startsWith('.') && part.length > 1 && !/^\\.[a-zA-Z0-9_-]+$/.test(part)) {
+      // Скрытые файлы в корне архива — подозрительно, но не всегда плохо
+      // Разрешаем .hidden только если не в начале пути с ..
+    }
+    if (/[<>:"|?*]/.test(part)) return false;
+  }
+  return true;
+}
+
+/** Проверка цифровой подписи PE файла (Windows) через PowerShell */
+function checkAuthenticodeSignature(filePath) {
+  // Синхронная заглушка — реальная проверка делается через PowerShell в warp-manager
+  // Здесь только базовая проверка MZ и размера
+  try {
+    if (!fs.existsSync(filePath)) return { ok: false, msg: 'Файл не найден' };
+    const stat = fs.statSync(filePath);
+    if (stat.size < 1024) return { ok: false, msg: 'Слишком маленький' };
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(2);
+    fs.readSync(fd, buf, 0, 2, 0);
+    fs.closeSync(fd);
+    if (buf[0] !== 0x4D || buf[1] !== 0x5A) return { ok: false, msg: 'Нет MZ' };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, msg: e.message };
+  }
 }
 
 module.exports = {
@@ -386,8 +503,15 @@ module.exports = {
   clampString,
   readJsonSafe,
   writeFileAtomic,
+  secureTempPath,
+  isSafeRealPath,
+  sanitizeEmail,
+  sanitizeWarpUrl,
+  isSafeArchiveEntry,
+  checkAuthenticodeSignature,
   EXTERNAL_SCHEMES,
   BROWSER_SCHEMES,
   UPDATE_HOSTS,
   BROWSERS,
+  WARP_HOSTS,
 };

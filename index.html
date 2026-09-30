@@ -1405,6 +1405,69 @@ body.th-night .sys-banner {
     </div>
     <div id="bg-image-status" style="font-size:10.5px;color:var(--tx3);font-family:var(--mono);margin-top:9px;min-height:16px"></div>
   </div>
+
+  <!-- Контекстное меню Windows -->
+  <div class="af-card" style="margin-bottom:14px">
+    <div class="section-title">🖱 Контекстное меню — Открыть через Artofix</div>
+    <p style="font-size:11px;color:var(--tx2);line-height:1.7;margin-bottom:12px">
+      Добавляет пункт «Открыть через Artofix» в меню правой кнопки мыши Windows.
+      Кликни на любой ссылке или HTML файле → выбери Artofix → сайт откроется в изолированном профиле браузера.
+      Работает для .url, .html, .htm, http/https ссылок и папок.
+    </p>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:180px">
+        <div style="font-size:10px;color:var(--tx3);letter-spacing:.8px;font-weight:700;margin-bottom:4px">СТАТУС</div>
+        <div id="ctx-menu-status" style="font-size:12px;font-weight:600;font-family:var(--mono)">⏳ Проверяем...</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" id="ctx-menu-enable" data-af-on="click" data-af-action="toggleContextMenu" data-af-args="[true]">✓ Включить</button>
+        <button class="btn btn-secondary" id="ctx-menu-disable" data-af-on="click" data-af-action="toggleContextMenu" data-af-args="[false]">✕ Выключить</button>
+      </div>
+    </div>
+    <p style="font-size:10px;color:var(--tx3);line-height:1.5">
+      Требует Windows. Регистрация в HKCU (не нужны права администратора).<br>
+      Типы: * (все файлы), Directory, http/https протоколы, .html/.htm/.url.
+    </p>
+  </div>
+
+  <!-- Email эмулятор -->
+  <div class="af-card" style="margin-bottom:14px">
+    <div class="section-title">📧 Эмуляция возраста почты</div>
+    <p style="font-size:11px;color:var(--tx2);line-height:1.7;margin-bottom:12px">
+      Artofix создаёт cookie файлы которые эмулируют возраст почты. Сайт видит что почта старая (6 мес — 3+ года),
+      но при этом чистая — ею якобы редко пользовались. Это повышает траст при регистрации аккаунтов.
+      Cookie сохраняются в папку профиля и автоматически подставляются в браузер через CDP.
+    </p>
+    <div class="grid-2">
+      <div>
+        <label class="field-label">Профиль</label>
+        <select class="af-input" id="email-profile-select" style="margin-bottom:8px">
+          <option value="default">default</option>
+        </select>
+      </div>
+      <div>
+        <label class="field-label">Возраст почты</label>
+        <select class="af-input" id="email-age" style="margin-bottom:8px">
+          <option value="новый">Новый (до 1 мес)</option>
+          <option value="6-12 мес">6-12 месяцев</option>
+          <option value="1-2 года" selected>1-2 года</option>
+          <option value="3+ года">3+ года (старый)</option>
+        </select>
+      </div>
+    </div>
+    <label class="field-label">Email адрес</label>
+    <input class="af-input" id="email-input" type="text" placeholder="example@gmail.com" style="margin-bottom:8px">
+    <div id="email-status" style="font-size:10.5px;color:var(--tx3);font-family:var(--mono);margin-bottom:12px;min-height:16px">Выбери профиль и введи email</div>
+    <div class="grid-2">
+      <button class="btn btn-primary" data-af-on="click" data-af-action="saveEmailCurrent">✓ Сохранить email</button>
+      <button class="btn btn-secondary" data-af-on="click" data-af-action="loadEmailCurrent">Загрузить</button>
+    </div>
+    <div style="margin-top:8px" class="grid-2">
+      <button class="btn btn-danger" data-af-on="click" data-af-action="removeEmailCurrent">🗑 Удалить эмуляцию</button>
+      <button class="btn btn-secondary" data-af-on="click" data-af-action="initEmailAges">Обновить возрасты</button>
+    </div>
+  </div>
+
 </div>
 </template>
 
@@ -1802,9 +1865,9 @@ body.th-night .sys-banner {
     <div id="cbn-dns-status" style="font-size:10.5px;color:var(--tx3);font-family:var(--mono);margin-top:9px;min-height:16px"></div>
   </div>
 
-  <!-- Cloudflare WARP в Чебурнете -->
+  <!-- Cloudflare WARP в Чебурнете (старый фикс) -->
   <div class="af-card" style="margin-bottom:14px">
-    <div class="section-title">🛡️ Cloudflare WARP в Чебурнете</div>
+    <div class="section-title">🛡️ Cloudflare WARP — фикс эндпоинтов</div>
     <p style="font-size:11px;color:var(--tx2);line-height:1.7;margin-bottom:12px">
       В РФ стандартные адреса Cloudflare WARP (1.1.1.1 / 162.159.192.1:2408) блокируются ТСПУ.
       Функция «Починить WARP» тестирует незаблокированные чистые эндпоинты Cloudflare,
@@ -1815,6 +1878,44 @@ body.th-night .sys-banner {
       <button class="btn btn-secondary btn-full" data-af-on="click" data-af-action="cbnTestWarp">🔍 Проверить эндпоинты WARP</button>
     </div>
     <div id="cbn-warp-status" style="font-size:10.5px;color:var(--tx3);font-family:var(--mono);margin-top:9px;min-height:16px"></div>
+  </div>
+
+  <!-- Artofix WARP Manager — установка, невидимый трей, только с Artofix -->
+  <div class="af-card" style="margin-bottom:14px;border:1px solid var(--ac-br, #4f46e533)">
+    <div class="section-title">☁️ Artofix WARP Manager — установка и автозапуск</div>
+    <p style="font-size:11px;color:var(--tx2);line-height:1.7;margin-bottom:12px">
+      Скачивает WARP с официального сайта Cloudflare, устанавливает тихо и делает невидимым в трее.
+      WARP запускается только когда запущен Artofix, и скрывается из автозагрузки.
+      <b style="color:var(--tx)">Если WARP уже был установлен до Artofix — ничего не меняем:</b> автозагрузку и видимость оставляем как было.
+    </p>
+    <div style="margin-bottom:10px">
+      <div style="font-size:10px;color:var(--tx3);letter-spacing:.8px;font-weight:700;margin-bottom:4px">СТАТУС WARP</div>
+      <div id="warp-status" style="font-size:12px;font-weight:600;font-family:var(--mono);line-height:1.6">⏳ Проверяем...</div>
+      <div id="warp-details" style="font-size:10px;color:var(--tx3);font-family:var(--mono);margin-top:6px;white-space:pre-wrap;line-height:1.6;min-height:16px"></div>
+    </div>
+    <div id="warp-progress-wrap" style="display:none;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:5px">
+        <span id="warp-progress-label" style="font-size:10.5px;font-family:var(--mono);color:var(--tx2)">Скачиваем...</span>
+        <span id="warp-progress-pct" style="font-size:10.5px;font-family:var(--mono);color:var(--ac);font-weight:700">0%</span>
+      </div>
+      <div class="progress-track"><div id="warp-progress-bar" class="progress-fill"></div></div>
+    </div>
+    <div class="grid-2">
+      <button class="btn btn-primary" id="warp-install-btn" data-af-on="click" data-af-action="installWarp">⬇ Установить WARP</button>
+      <button class="btn btn-secondary" id="warp-start-btn" data-af-on="click" data-af-action="startWarp">▶ Запустить</button>
+    </div>
+    <div class="grid-2" style="margin-top:8px">
+      <button class="btn btn-secondary" id="warp-hide-btn" data-af-on="click" data-af-action="hideWarp">👻 Скрыть из трея</button>
+      <button class="btn btn-danger" id="warp-stop-btn" data-af-on="click" data-af-action="stopWarp">■ Остановить</button>
+    </div>
+    <div style="margin-top:8px">
+      <button class="btn btn-secondary btn-full" data-af-on="click" data-af-action="initWarpUI">🔄 Обновить статус</button>
+    </div>
+    <p style="font-size:10px;color:var(--tx3);line-height:1.5;margin-top:10px">
+      • Скачивание с <code style="color:var(--ac);font-family:var(--mono)">1111-releases.cloudflareclient.com</code> или <code>install.appcenter.ms</code> — только официальные домены.<br>
+      • Маркер <code>.artofix_warp_installed_by_us</code> в папке Artofix — отличает нашу установку от предустановленной.<br>
+      • При выходе из Artofix WARP останавливается только если мы его устанавливали.
+    </p>
   </div>
 
   <!-- Аварийный режим -->
